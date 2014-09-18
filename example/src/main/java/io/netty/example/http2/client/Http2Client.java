@@ -28,8 +28,10 @@ import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http2.Http2OrHttpChooser.SelectedProtocol;
+import io.netty.handler.codec.http2.Http2SecurityUtil;
 import io.netty.handler.ssl.JettyAlpnSslEngineWrapper;
 import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SupportedCipherSuiteFilter;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.util.CharsetUtil;
 
@@ -57,12 +59,10 @@ public final class Http2Client {
         if (SSL) {
             sslCtx = SslContext.newClientContext(
                     null, InsecureTrustManagerFactory.INSTANCE,
-                    Arrays.asList("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-                            // NOTE: Block ciphers are prohibited by the HTTP/2 specification
-                            // http://tools.ietf.org/html/draft-ietf-httpbis-http2-14#section-9.2.2.
-                            // The following cipher exists to allow these examples to run with older JREs.
-                            // Please consult the HTTP/2 specification when selecting cipher suites.
-                            "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA"),
+                    Http2SecurityUtil.CIPHERS,
+                    /* NOTE: the following filter may not include all ciphers required by the HTTP/2 specification
+                     * Please refer to the HTTP/2 specification for cipher requirements. */
+                    SupportedCipherSuiteFilter.INSTANCE,
                     Arrays.asList(SelectedProtocol.HTTP_2.protocolName(), SelectedProtocol.HTTP_1_1.protocolName()),
                     JettyAlpnSslEngineWrapper.instance(),
                     0, 0);
@@ -98,8 +98,8 @@ public final class Http2Client {
                 // Create a simple GET request.
                 FullHttpRequest request = new DefaultFullHttpRequest(HTTP_1_1, GET, URL);
                 request.headers().add(HttpHeaders.Names.HOST, hostName);
-                // TODO: fix me when HTTP/2 supports decompression
-                // request.headers().add(HttpHeaders.Names.ACCEPT_ENCODING, HttpHeaders.Values.GZIP);
+                request.headers().add(HttpHeaders.Names.ACCEPT_ENCODING, HttpHeaders.Values.GZIP);
+                request.headers().add(HttpHeaders.Names.ACCEPT_ENCODING, HttpHeaders.Values.DEFLATE);
                 channel.writeAndFlush(request);
                 responseHandler.put(streamId, channel.newPromise());
                 streamId += 2;
@@ -109,8 +109,8 @@ public final class Http2Client {
                 FullHttpRequest request = new DefaultFullHttpRequest(HTTP_1_1, POST, URL2,
                                 Unpooled.copiedBuffer(URL2DATA.getBytes(CharsetUtil.UTF_8)));
                 request.headers().add(HttpHeaders.Names.HOST, hostName);
-                // TODO: fix me when HTTP/2 supports decompression
-                // request.headers().add(HttpHeaders.Names.ACCEPT_ENCODING, HttpHeaders.Values.GZIP);
+                request.headers().add(HttpHeaders.Names.ACCEPT_ENCODING, HttpHeaders.Values.GZIP);
+                request.headers().add(HttpHeaders.Names.ACCEPT_ENCODING, HttpHeaders.Values.DEFLATE);
                 channel.writeAndFlush(request);
                 responseHandler.put(streamId, channel.newPromise());
                 streamId += 2;

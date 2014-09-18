@@ -15,11 +15,10 @@
  */
 package io.netty.handler.ssl;
 
-import static org.junit.Assume.assumeNoException;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.eq;
+import static org.junit.Assume.assumeNoException;
 import static org.mockito.Mockito.verify;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
@@ -37,10 +36,12 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.util.NetUtil;
+import io.netty.util.concurrent.Future;
 
 import java.net.InetSocketAddress;
 import java.security.cert.CertificateException;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -49,12 +50,12 @@ import javax.net.ssl.SSLException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 public class JettySslEngineTest {
     private static final String APPLICATION_LEVEL_PROTOCOL = "my-protocol";
-
     @Mock
     private MessageReciever serverReceiver;
     @Mock
@@ -76,15 +77,18 @@ public class JettySslEngineTest {
 
     private final class MessageDelegatorChannelHandler extends SimpleChannelInboundHandler<ByteBuf> {
         private final MessageReciever receiver;
+        private final CountDownLatch latch;
 
-        public MessageDelegatorChannelHandler(MessageReciever receiver) {
+        public MessageDelegatorChannelHandler(MessageReciever receiver, CountDownLatch latch) {
             super(false);
             this.receiver = receiver;
+            this.latch = latch;
         }
 
         @Override
         protected void messageReceived(ChannelHandlerContext ctx, ByteBuf msg) throws Exception {
             receiver.messageReceived(msg);
+            latch.countDown();
         }
     }
 
@@ -99,8 +103,12 @@ public class JettySslEngineTest {
     public void tearDown() throws InterruptedException {
         if (serverChannel != null) {
             serverChannel.close().sync();
-            sb.group().shutdownGracefully();
-            cb.group().shutdownGracefully();
+            Future<?> serverGroup = sb.group().shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+            Future<?> serverChildGroup = sb.childGroup().shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+            Future<?> clientGroup = cb.group().shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+            serverGroup.sync();
+            serverChildGroup.sync();
+            clientGroup.sync();
         }
         clientChannel = null;
         serverChannel = null;
@@ -113,7 +121,7 @@ public class JettySslEngineTest {
         try {
             wrapper = JettyNpnSslEngineWrapper.instance();
         } catch (SSLException e) {
-            // NPN availability is dependent on the java version.  If NPN is not available because of
+            // NPN availability is dependent on the java version. If NPN is not available because of
             // java version incompatibility don't fail the test, but instead just skip the test
             assumeNoException(e);
         }
@@ -127,7 +135,7 @@ public class JettySslEngineTest {
         try {
             wrapper = JettyAlpnSslEngineWrapper.instance();
         } catch (SSLException e) {
-            // ALPN availability is dependent on the java version.  If NPN is not available because of
+            // ALPN availability is dependent on the java version. If NPN is not available because of
             // java version incompatibility don't fail the test, but instead just skip the test
             assumeNoException(e);
         }
@@ -136,12 +144,12 @@ public class JettySslEngineTest {
     }
 
     private void mySetup(SslEngineWrapperFactory wrapper) throws InterruptedException, SSLException,
-            CertificateException {
+                    CertificateException {
         SelfSignedCertificate ssc = new SelfSignedCertificate();
         serverSslCtx = SslContext.newServerContext(SslProvider.JDK, ssc.certificate(), ssc.privateKey(), null, null,
-                Arrays.asList(APPLICATION_LEVEL_PROTOCOL), wrapper, 0, 0);
+                        IdentityCipherSuiteFilter.INSTANCE, Arrays.asList(APPLICATION_LEVEL_PROTOCOL), wrapper, 0, 0);
         clientSslCtx = SslContext.newClientContext(SslProvider.JDK, null, InsecureTrustManagerFactory.INSTANCE, null,
-                Arrays.asList(APPLICATION_LEVEL_PROTOCOL), wrapper, 0, 0);
+                        IdentityCipherSuiteFilter.INSTANCE, Arrays.asList(APPLICATION_LEVEL_PROTOCOL), wrapper, 0, 0);
 
         serverConnectedChannel = null;
         sb = new ServerBootstrap();
@@ -154,7 +162,7 @@ public class JettySslEngineTest {
             protected void initChannel(Channel ch) throws Exception {
                 ChannelPipeline p = ch.pipeline();
                 p.addLast(serverSslCtx.newHandler(ch.alloc()));
-                p.addLast(new MessageDelegatorChannelHandler(serverReceiver));
+                p.addLast(new MessageDelegatorChannelHandler(serverReceiver, serverLatch));
                 serverConnectedChannel = ch;
             }
         });
@@ -166,7 +174,7 @@ public class JettySslEngineTest {
             protected void initChannel(Channel ch) throws Exception {
                 ChannelPipeline p = ch.pipeline();
                 p.addLast(clientSslCtx.newHandler(ch.alloc()));
-                p.addLast(new MessageDelegatorChannelHandler(clientReceiver));
+                p.addLast(new MessageDelegatorChannelHandler(clientReceiver, clientLatch));
             }
         });
 
@@ -179,8 +187,8 @@ public class JettySslEngineTest {
     }
 
     private void runTest() throws Exception {
-        ByteBuf clientMessage = Unpooled.copiedBuffer("I am a client".getBytes());
-        ByteBuf serverMessage = Unpooled.copiedBuffer("I am a server".getBytes());
+        final ByteBuf clientMessage = Unpooled.copiedBuffer("I am a client".getBytes());
+        final ByteBuf serverMessage = Unpooled.copiedBuffer("I am a server".getBytes());
         try {
             writeAndVerifyReceived(clientMessage.retain(), clientChannel, serverLatch, serverReceiver);
             writeAndVerifyReceived(serverMessage.retain(), serverConnectedChannel, clientLatch, clientReceiver);
@@ -202,10 +210,22 @@ public class JettySslEngineTest {
     }
 
     private static void writeAndVerifyReceived(ByteBuf message, Channel sendChannel, CountDownLatch receiverLatch,
-            MessageReciever receiver) throws Exception {
-        sendChannel.writeAndFlush(message);
-        receiverLatch.await(2, TimeUnit.SECONDS);
-        message.resetReaderIndex();
-        verify(receiver).messageReceived(eq(message));
+                    MessageReciever receiver) throws Exception {
+        List<ByteBuf> dataCapture = null;
+        try {
+            sendChannel.writeAndFlush(message);
+            receiverLatch.await(5, TimeUnit.SECONDS);
+            message.resetReaderIndex();
+            ArgumentCaptor<ByteBuf> captor = ArgumentCaptor.forClass(ByteBuf.class);
+            verify(receiver).messageReceived(captor.capture());
+            dataCapture = captor.getAllValues();
+            assertEquals(message, dataCapture.get(0));
+        } finally {
+            if (dataCapture != null) {
+                for (ByteBuf data : dataCapture) {
+                    data.release();
+                }
+            }
+        }
     }
 }
